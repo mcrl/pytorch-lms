@@ -73,6 +73,13 @@ static std::array<LeakyStreamInternals, kStreamsPerPool>
 static std::array<LeakyStreamInternals, kStreamsPerPool>
     high_priority_streams[C10_COMPILE_TIME_MAX_GPUS];
 
+// LMS streams
+static constexpr unsigned int kLMSFlags = cudaStreamNonBlocking;
+static std::once_flag device_flags_lms[C10_COMPILE_TIME_MAX_GPUS];
+static std::atomic<uint32_t> lms_counters[C10_COMPILE_TIME_MAX_GPUS];
+static std::array<LeakyStreamInternals, kStreamsPerPool>
+    lms_streams[C10_COMPILE_TIME_MAX_GPUS];
+
 // Note [StreamId assignment]
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~
 // How do we assign stream IDs?
@@ -84,6 +91,7 @@ static std::array<LeakyStreamInternals, kStreamsPerPool>
 //  00 = default stream
 //  01 = low priority stream
 //  10 = high priority stream
+//  11 = LMS stream
 //
 // This is not really for efficiency; it's just easier to write the code
 // to extract the index if we do this with bitmasks :)
@@ -104,6 +112,7 @@ enum class StreamIdType : uint8_t {
   DEFAULT = 0x0,
   LOW = 0x1,
   HIGH = 0x2,
+  LMS = 0x3,
 };
 
 std::ostream& operator<<(std::ostream& stream, StreamIdType s) {
@@ -116,6 +125,9 @@ std::ostream& operator<<(std::ostream& stream, StreamIdType s) {
       break;
     case StreamIdType::HIGH:
       stream << "HIGH";
+      break;
+    case StreamIdType::LMS:
+      stream << "LMS";
       break;
     default:
       stream << static_cast<uint8_t>(s);
@@ -176,6 +188,13 @@ static StreamId CUDAStream_getStreamId(const LeakyStreamInternals* ptr) {
           ptr, high_priority_streams[device_index])) {
     return makeStreamId(
         StreamIdType::HIGH, ptr - high_priority_streams[device_index].data());
+  }
+
+  // Check if it's a LMS stream
+  if (pointer_within<LeakyStreamInternals>(
+          ptr, lms_streams[device_index])) {
+    return makeStreamId(
+        StreamIdType::LMS, ptr - lms_streams[device_index].data());
   }
 
   AT_ASSERTM(
@@ -243,6 +262,21 @@ static void initDeviceStreamState(DeviceIndex device_index) {
   }
 }
 
+// Creates the LMS stream pools for the specified device
+// Warning: only call once per device!
+static void initDeviceLMSStreamState(DeviceIndex device_index) {
+  // Switches to the requested device so streams are properly associated
+  // with it.
+  CUDAGuard device_guard{device_index};
+
+  for (auto i = decltype(kStreamsPerPool){0}; i < kStreamsPerPool; ++i) {
+    auto& stream = lms_streams[device_index][i];
+
+    stream.device_index = device_index;
+    C10_CUDA_CHECK(cudaStreamCreateWithFlags(&stream.stream, kLMSFlags));
+  }
+}
+
 // Init front-end to ensure initialization only occurs once
 static void initCUDAStreamsOnce() {
   // Inits default streams (once, globally)
@@ -293,6 +327,8 @@ LeakyStreamInternals* CUDAStream_internals(CUDAStream s) {
       return &low_priority_streams[device_index][si];
     case StreamIdType::HIGH:
       return &high_priority_streams[device_index][si];
+    case StreamIdType::LMS:
+      return &lms_streams[device_index][si];
     default:
       AT_ASSERTM(
           0,
@@ -367,6 +403,20 @@ void setCurrentCUDAStream(CUDAStream stream) {
   auto ptr = CUDAStream_internals(stream);
   AT_ASSERT(ptr);
   current_streams[ptr->device_index] = ptr;
+}
+
+CUDAStream getLMSCUDAStream(DeviceIndex device_index) {
+  initCUDAStreamsOnce();
+  if (device_index == -1)
+    device_index = current_device();
+  check_gpu(device_index);
+
+  // Initializes the LMS stream pool (once)
+  std::call_once(
+      device_flags_lms[device_index], initDeviceLMSStreamState, device_index);
+
+  const auto idx = get_idx(lms_counters[device_index]);
+  return CUDAStream_fromInternals(&lms_streams[device_index][idx]);
 }
 
 std::ostream& operator<<(std::ostream& stream, const CUDAStream& s) {

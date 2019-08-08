@@ -2534,6 +2534,117 @@ t2.start()
     def test_to_numpy(self):
         self.assertRaises(TypeError, lambda: torch.empty(1, device="cuda").numpy())
 
+    def test_large_model_support(self):
+        device = torch.cuda.current_device()
+        default_enabled = torch.cuda.get_enabled_lms()
+        default_limit = torch.cuda.get_limit_lms()
+
+        def alloc(*size):
+            with torch.cuda.device(device):
+                return torch.cuda.FloatTensor(*size).normal_()
+
+        def collect_stat(stats_array, stat):
+            return [i[stat] for i in stats_array]
+
+        # 1. Test Inactive LMS Off
+        #    LMS Off / alloc multiple small and large
+        #    assert(pinned memory == allocated memory)
+        # 2. Test Inactive LMS On
+        #    LMS On  / alloc multiple small and large
+        #    assert(pinned memory < allocated memory)
+        def _test_lms_enabled(enabled):
+            torch.cuda.empty_cache()
+            torch.cuda.set_enabled_lms(enabled)
+            tensors = [alloc(32), alloc(128), alloc(10, 1024, 1024)]
+            stats = torch.cuda.memory_stats(device)
+            allocated = stats["allocated_bytes.all.current"]
+            pinned = stats["pinned_bytes.all.current"]
+            if not enabled:
+                self.assertEqual(allocated, pinned)
+            else:
+                self.assertGreater(allocated, pinned)
+            del tensors
+
+        _test_lms_enabled(enabled=False)
+        _test_lms_enabled(enabled=True)
+
+        # 3. Test LMS Limit Swap
+        #    LMS On, limit low / alloc multiple small and large / record memory stats / alloc large
+        #    assert(allocated is unchanged)
+        # 4. Test LMS Limit Alloc
+        #    LMS On, limit high / alloc multiple small and large / record memory stats / alloc large
+        #    assert(allocated has increased)
+        def _test_lms_limit(low):
+            stats = []
+            torch.cuda.empty_cache()
+            torch.cuda.set_limit_lms(80*1024*1024 if low else 1024*1024*1024)
+            tensors = [alloc(32), alloc(128), alloc(10, 1024, 1024)]
+            stats.append(torch.cuda.memory_stats(device))
+            tensors.append(alloc(10, 1024, 1024))
+            stats.append(torch.cuda.memory_stats(device))
+            allocated = collect_stat(stats, "allocated_bytes.all.current")
+            reclaimed = collect_stat(stats, "reclaimed_bytes")
+            malloc_calls = collect_stat(stats, "alloc_distribution.cudamalloc")
+            reclaim_calls = collect_stat(stats, "alloc_distribution.reclaim_one")
+            if low:
+                self.assertEqual(allocated[1], allocated[0])
+                self.assertGreater(reclaimed[1], reclaimed[0])
+                self.assertEqual(malloc_calls[1], malloc_calls[0])
+                self.assertGreater(reclaim_calls[1], reclaim_calls[0])
+            else:
+                self.assertGreater(allocated[1], allocated[0])
+                self.assertEqual(reclaimed[1], reclaimed[0])
+                self.assertGreater(malloc_calls[1], malloc_calls[0])
+                self.assertEqual(reclaim_calls[1], reclaim_calls[0])
+            del tensors
+
+        _test_lms_limit(low=True)
+        _test_lms_limit(low=False)
+        torch.cuda.set_limit_lms(default_limit)
+
+        # 5. Test LMS Page-out
+        #    LMS On / alloc multiple small and large / record memory stats / reclaim all
+        #    assert(allocated has decreased && pinned/reserved are unchanged)
+        stats = []
+        sums = [];
+        torch.cuda.empty_cache()
+        tensors = [alloc(32), alloc(128), alloc(10, 1024, 1024)]
+        sums.append([torch.sum(t).item() for t in tensors])
+        stats.append(torch.cuda.memory_stats(device)) # 0
+        torch.cuda.reclaim_inactive()
+        stats.append(torch.cuda.memory_stats(device)) # 1
+        reserved = collect_stat(stats, "reserved_bytes.all.current")
+        allocated = collect_stat(stats, "allocated_bytes.all.current")
+        pinned = collect_stat(stats, "pinned_bytes.all.current")
+        reclaimed = collect_stat(stats, "reclaimed_bytes")
+        self.assertGreater(reclaimed[1], reclaimed[0])
+        self.assertEqual(pinned[0], pinned[1])
+        self.assertEqual(reserved[0], reserved[1])
+        self.assertGreater(allocated[0], allocated[1])
+
+        # 6. Test LMS Page-in
+        #    Access tensors again
+        #    assert(tensor data is preserved during reclaim)
+        #    assert(allocated has been restored && active/cached are still unchanged)
+        sums.append([torch.sum(t).item() for t in tensors])
+        self.assertEqual(sums[0], sums[1])
+        stats.append(torch.cuda.memory_stats(device)) # 2
+        reserved = collect_stat(stats, "reserved_bytes.all.current")
+        allocated = collect_stat(stats, "allocated_bytes.all.current")
+        pinned = collect_stat(stats, "pinned_bytes.all.current")
+        freelist_calls = collect_stat(stats, "alloc_distribution.freelist")
+        malloc_calls  = collect_stat(stats, "alloc_distribution.cudamalloc")
+        self.assertEqual(pinned[0], pinned[2])
+        self.assertEqual(reserved[0], reserved[2])
+        self.assertEqual(allocated[0], allocated[2])
+        self.assertGreater(freelist_calls[2], freelist_calls[1])
+        self.assertEqual(malloc_calls[2], malloc_calls[1])
+        del sums
+        del tensors
+        del stats
+
+        # Reset LMS state
+        torch.cuda.set_enabled_lms(default_enabled)
 
 if __name__ == '__main__':
     run_tests()

@@ -213,6 +213,11 @@ CAFFE2_API CUDAStream getCurrentCUDAStream(DeviceIndex device_index = -1);
  */
 CAFFE2_API void setCurrentCUDAStream(CUDAStream stream);
 
+/**
+ * Get a new stream from the CUDA stream pool for LMS.
+ */
+CAFFE2_API CUDAStream getLMSCUDAStream(DeviceIndex device = -1);
+
 C10_API std::ostream& operator<<(std::ostream& stream, const CUDAStream& s);
 
 } // namespace cuda

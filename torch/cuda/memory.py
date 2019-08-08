@@ -107,6 +107,10 @@ def memory_stats(device=None):
       number of active memory blocks.
     - ``"active_bytes.{all,large_pool,small_pool}.{current,peak,allocated,freed}"``:
       amount of active memory.
+    - ``"pinned.{all,large_pool,small_pool}.{current,peak,allocated,freed}"``:
+      number of pinned, non-reclaimable memory blocks (LMS).
+    - ``"pinned_bytes.{all,large_pool,small_pool}.{current,peak,allocated,freed}"``:
+      amount of pinned, non-reclaimable memory (LMS).
     - ``"inactive_split.{all,large_pool,small_pool}.{current,peak,allocated,freed}"``:
       number of inactive, non-releasable memory blocks.
     - ``"inactive_split_bytes.{all,large_pool,small_pool}.{current,peak,allocated,freed}"``:
@@ -135,6 +139,8 @@ def memory_stats(device=None):
     - ``"num_alloc_retries"``: number of failed ``cudaMalloc`` calls that
       result in a cache flush and retry.
     - ``"num_ooms"``: number of out-of-memory errors thrown.
+    - ``"reclaimed"``: number of blocks transfered to the host (LMS).
+    - ``"reclaimed_bytes"``: amount of memory transfered to the host (LMS).
 
     Arguments:
         device (torch.device or int, optional): selected device. Returns
@@ -387,6 +393,7 @@ def memory_summary(device=None, abbreviated=False):
     """
     device = _get_device_index(device, optional=True)
     stats = memory_stats(device=device)
+    lms = get_enabled_lms()
 
     def _format_size(sz, pref_sz):
         prefixes = ["B ", "KB", "MB", "GB", "TB", "PB"]
@@ -410,22 +417,44 @@ def memory_summary(device=None, abbreviated=False):
             pref_cnt /= 1000
         return "{:7d} {} ".format(cnt, prefix)
 
-    metrics_to_display = [
-        ("allocated_bytes", "Allocated memory", _format_size),
-        ("active_bytes", "Active memory", _format_size),
-        ("reserved_bytes", "GPU reserved memory", _format_size),
-        ("inactive_split_bytes", "Non-releasable memory", _format_size),
-        ("allocation", "Allocations", _format_count),
-        ("active", "Active allocs", _format_count),
-        ("segment", "GPU reserved segments", _format_count),
-        ("inactive_split", "Non-releasable allocs", _format_count),
-    ]
+    metrics_to_display = []
+    metrics_to_display.append(("allocated_bytes", "Allocated memory", _format_size))
+    metrics_to_display.append(("active_bytes", "Active memory", _format_size))
+    if lms:
+        metrics_to_display.append(("pinned_bytes", "Pinned memory", _format_size))
+    metrics_to_display.append(("reserved_bytes", "GPU reserved memory", _format_size))
+    metrics_to_display.append(("inactive_split_bytes", "Non-releasable memory", _format_size))
+    metrics_to_display.append(("allocation", "Allocations", _format_count))
+    metrics_to_display.append(("active", "Active allocs", _format_count))
+    if lms:
+        metrics_to_display.append(("pinned", "Pinned allocs", _format_count))
+    metrics_to_display.append(("segment", "GPU reserved segments", _format_count))
+    metrics_to_display.append(("inactive_split", "Non-releasable allocs", _format_count))
 
     lines = []
     lines.append("=" * 75)
     lines.append(" {_:16} PyTorch CUDA memory summary, device ID {device:<17d} ")
     lines.append("-" * 75)
-    lines.append("  {_:9} CUDA OOMs: {num_ooms:<12d} | {_:6} cudaMalloc retries: {num_alloc_retries:<8d}  ")
+    lines.append("  {_:8} CUDA OOMs: {num_ooms:<12d}  | {_:5} cudaMalloc retries: {num_alloc_retries:<10d} ")
+    if lms:
+        reclaimed_bytes = stats["reclaimed_bytes"]
+        lines.append("    Reclaimed memory: {}    |         Reclaimed blocks: {:<10d} ".format(
+            _format_size(reclaimed_bytes, reclaimed_bytes),
+            stats["reclaimed"])
+        )
+        lines.append("     Freelist allocs: {:<12d}  |              CUDA allocs: {:<10d} ".format(
+            stats["alloc_distribution.freelist"],
+            stats["alloc_distribution.cudamalloc"])
+        )
+        lines.append("      Reclaim allocs: {:<12d}  | Reclaim fragments allocs: {:<10d} ".format(
+            stats["alloc_distribution.reclaim_one"],
+            stats["alloc_distribution.reclaim_fragments"])
+        )
+        lines.append("  Reclaim all allocs: {:<12d}  |        CUDA retry allocs: {:<10d} ".format(
+            stats["alloc_distribution.reclaim_all"],
+            stats["alloc_distribution.cudamalloc_retry"])
+        )
+
     lines.append("=" * 75)
     lines.append("        Metric         | Cur Usage  | Peak Usage | Tot Alloc  | Tot Freed  ")
 
@@ -466,3 +495,61 @@ def memory_summary(device=None, abbreviated=False):
     for k, v in stats.items():
         fmt_dict[k.replace(".", "-")] = v
     return "|" + "|\n|".join(lines).format(**fmt_dict) + "|\n"
+
+
+def set_enabled_lms(enable):
+    r"""Enable/disable Large Model Support.
+
+    Arguments:
+        enable (bool): desired LMS setting.
+    """
+    torch._C._cuda_setEnabledLMS(enable)
+
+
+def get_enabled_lms():
+    r"""Returns a bool indicating if Large Model Support is currently enabled."""
+    return torch._C._cuda_getEnabledLMS()
+
+
+def set_size_lms(size):
+    r"""Deprecated;  Mininum size (in bytes) for LMS.
+
+    Arguments:
+        size (integer): Any memory block larger than this will be subject to LMS optimization.
+    """
+    warnings.warn(
+        "torch.cuda.set_size_lms has been deprecated.  All blocks are now subject to LMS optimization",
+        DeprecationWarning)
+
+
+def get_size_lms():
+    r"""Deprecated;  Returns the minimum size (in bytes) for LMS."""
+    warnings.warn(
+        "torch.cuda.get_size_lms has been deprecated.  All blocks are now subject to LMS optimization",
+        DeprecationWarning)
+    return 0
+
+
+def set_limit_lms(limit):
+    r"""Allocation limit (in bytes) for LMS.
+
+    Arguments:
+        limit (integer): LMS limit on device memory.
+    """
+    torch._C._cuda_setLimitLMS(limit)
+
+
+def get_limit_lms():
+    r"""Returns the limit (in bytes) for LMS."""
+    return torch._C._cuda_getLimitLMS()
+
+
+def reclaim_inactive():
+    r"""Swaps the memory of all inactive tensors out to the host so that those can be returned
+    to the caching allocator.
+
+    .. note::
+        The set of inactive tensors is maintained only when Large Model Support is enabled.
+    """
+    if is_initialized():
+        torch._C._cuda_reclaimInactive()

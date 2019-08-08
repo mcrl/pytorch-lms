@@ -4,6 +4,7 @@
 #include <ATen/InitialTensorOptions.h>
 #include <ATen/MatrixRef.h>
 #include <ATen/NativeFunctions.h>
+#include <ATen/TensorGuard.h>
 #include <ATen/TensorUtils.h>
 #include <ATen/cuda/CUDAConfig.h>
 #include <ATen/cuda/CUDAEvent.h>
@@ -778,6 +779,7 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor> _cudnn_rnn(
           &reserve_size
           ));
     reserve = at::empty(reserve_size, input.options().dtype(kByte));
+    TensorListGuard rnn_tensor_guard({x, y, hy, cy});
     AT_CUDNN_CHECK(cudnnRNNForwardTraining(
           handle,
           descs.rnn_desc.desc(),
@@ -794,6 +796,7 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor> _cudnn_rnn(
           ));
   } else { // inference
     reserve = at::empty({0}, input.options().dtype(kByte));
+    TensorListGuard rnn_tensor_guard({x, y, hy, cy});
     AT_CUDNN_CHECK(cudnnRNNForwardInference(
           handle,
           descs.rnn_desc.desc(),
@@ -1202,6 +1205,7 @@ Tensor try_get_weight_buf(
   }
 
   // Get and check data pointers
+  TensorGuard weight_buf_tensor_guard(weight_buf);
   auto expected_data_ptrs = get_expected_data_ptrs(
       weight_buf, handle, rnn, rnn_desc, x_desc, datatype);
 

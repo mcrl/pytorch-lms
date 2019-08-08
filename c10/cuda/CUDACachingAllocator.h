@@ -3,6 +3,7 @@
 
 #include <c10/cuda/CUDAStream.h>
 #include <c10/core/Allocator.h>
+#include <c10/core/StorageImpl.h>
 #include <c10/cuda/CUDAMacros.h>
 #include <c10/util/Registry.h>
 
@@ -58,7 +59,18 @@ enum struct StatType : uint64_t {
   NUM_TYPES = 3  // remember to update this whenever a new stat type is added
 };
 
+enum struct AllocSource : uint64_t {
+  FREELIST,
+  CUDAMALLOC,
+  RECLAIM_ONE,
+  RECLAIM_FRAGMENTS,
+  RECLAIM_ALL,
+  CUDAMALLOC_RETRY,
+  NUM_ALLOC_SOURCES
+};
+
 typedef std::array<Stat, static_cast<size_t>(StatType::NUM_TYPES)> StatArray;
+typedef std::array<uint64_t, static_cast<size_t>(AllocSource::NUM_ALLOC_SOURCES)> AllocSourceArray;
 
 // Struct containing memory allocator summary statistics for a device.
 struct DeviceStats {
@@ -70,6 +82,8 @@ struct DeviceStats {
   StatArray active;
   // COUNT: number of inactive, split memory blocks (unallocated but can't be released via cudaFree)
   StatArray inactive_split;
+  // COUNT: number of blocks pinned (LMS)
+  StatArray pinned;
 
   // SUM: bytes requested by client code
   StatArray allocated_bytes;
@@ -79,12 +93,23 @@ struct DeviceStats {
   StatArray active_bytes;
   // SUM: bytes within inactive, split memory blocks
   StatArray inactive_split_bytes;
+  // SUM: bytes within pinned blocks (LMS)
+  StatArray pinned_bytes;
 
   // COUNT: total number of failed calls to CUDA malloc necessitating cache flushes.
   int64_t num_alloc_retries = 0;
 
   // COUNT: total number of OOMs (i.e. failed calls to CUDA after cache flush)
   int64_t num_ooms = 0;
+
+  // COUNT: total number of blocks reclaimed (LMS)
+  int64_t reclaimed = 0;
+
+  // SUM: total number of bytes reclaimed (LMS)
+  int64_t reclaimed_bytes = 0;
+
+  // COUNT: total number of allocation requests satisfied from each source (histogram)
+  AllocSourceArray alloc_distribution = { 0 };
 };
 
 // Struct containing info of an allocation block (i.e. a fractional part of a cudaMalloc)..
@@ -110,6 +135,7 @@ C10_CUDA_API void* raw_alloc_with_stream(size_t nbytes, cudaStream_t stream);
 C10_CUDA_API void raw_delete(void* ptr);
 
 C10_CUDA_API Allocator* get();
+C10_CUDA_API void init(int device_count, at::Allocator* host_allocator);
 C10_CUDA_API void emptyCache();
 C10_CUDA_API void cacheInfo(int dev_id, size_t* cachedAndFree, size_t* largestBlock);
 C10_CUDA_API void* getBaseAllocation(void *ptr, size_t *size);
@@ -118,6 +144,11 @@ C10_CUDA_API DeviceStats getDeviceStats(int device);
 C10_CUDA_API void resetAccumulatedStats(int device);
 C10_CUDA_API void resetPeakStats(int device);
 C10_CUDA_API std::vector<SegmentInfo> snapshot();
+C10_CUDA_API void   setUserEnabledLMS(bool enable);
+C10_CUDA_API bool   userEnabledLMS(void);
+C10_CUDA_API void   setUserLimitLMS(size_t limit);
+C10_CUDA_API size_t userLimitLMS(void);
+C10_CUDA_API void reclaimInactive();
 
 C10_CUDA_API std::mutex* getFreeMutex();
 

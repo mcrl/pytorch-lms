@@ -124,6 +124,9 @@ inline bool operator!=(std::nullptr_t, const DataPtr& dp) noexcept {
   return dp;
 }
 
+struct StorageImpl;
+class LmsStorageImpl;
+
 // Note [raw_allocate/raw_deallocate and Thrust]
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // Thrust's support for custom allocators requires us to write something
@@ -155,6 +158,9 @@ struct C10_API Allocator {
   // it means the rawAllocate and rawDeallocate APIs are safe to use.
   // This function MUST always return the same BoundDeleter.
   virtual DeleterFnPtr raw_deleter() const {
+    return nullptr;
+  }
+  virtual LmsStorageImpl* AsLmsStorage(StorageImpl* storage) const {
     return nullptr;
   }
   void* raw_allocate(size_t n) {

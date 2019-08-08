@@ -2,6 +2,7 @@
 
 #include <c10/core/Allocator.h>
 #include <c10/core/ScalarType.h>
+#include <c10/core/LargeModelSupport.h>
 
 #include <c10/util/intrusive_ptr.h>
 
@@ -20,7 +21,8 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
         numel_(numel),
         resizable_(resizable),
         received_cuda_(false),
-        allocator_(allocator) {
+        allocator_(allocator),
+        lms_(allocator ? allocator->AsLmsStorage(this) : nullptr) {
     if (resizable) {
       AT_ASSERTM(
           allocator_, "For resizable storage, allocator must be provided");
@@ -53,6 +55,7 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
   ~StorageImpl() = default;
 
   void reset() {
+    lms_.reset(nullptr);
     data_ptr_.clear();
     numel_ = 0;
   }
@@ -77,10 +80,13 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
 
   template <typename T>
   inline T* unsafe_data() const {
+    if (lms_enabled()) lms_->ensure_data();
     return static_cast<T*>(this->data_ptr_.get());
   }
 
   void release_resources() override {
+    if (lms_enabled())
+      lms_->release_resources();
     data_ptr_.clear();
   }
 
@@ -106,15 +112,18 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
   };
 
   at::DataPtr& data_ptr() {
+    if (lms_enabled()) lms_->ensure_data();
     return data_ptr_;
   };
 
   const at::DataPtr& data_ptr() const {
+    if (lms_enabled()) lms_->ensure_data();
     return data_ptr_;
   };
 
   // Returns the previous data_ptr
   at::DataPtr set_data_ptr(at::DataPtr&& data_ptr) {
+    if (lms_enabled()) lms_->ensure_data();
     std::swap(data_ptr_, data_ptr);
     return std::move(data_ptr);
   };
@@ -130,10 +139,12 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
 
   // TODO: Return const ptr eventually if possible
   void* data() {
+    if (lms_enabled()) lms_->ensure_data();
     return data_ptr_.get();
   }
 
   void* data() const {
+    if (lms_enabled()) lms_->ensure_data();
     return data_ptr_.get();
   }
 
@@ -192,6 +203,7 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
       at::DataPtr&& data_ptr,
       const caffe2::TypeMeta& data_type,
       size_t capacity) {
+    lms_.reset(nullptr);
     data_type_ = data_type;
     // TODO: Use CAFFE_ENFORCE_WITH_CALLER equivalent
     // For now causes lots of redefine issues if caffe2/core/logging.h is used
@@ -221,6 +233,16 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
     return received_cuda_;
   }
 
+  // Large Model Support
+  bool lms_enabled() const             { return lms_.get() != nullptr; }
+  bool lms_pin()                       { return lms_enabled() && lms_->pin(); }
+  bool lms_unpin()                     { return lms_->unpin(); }
+  bool lms_reclaimed() const           { return lms_->reclaimed(); }
+
+  void lms_copy_reclaimed_data(void* dst, size_t size) {
+    lms_->copy_reclaimed_data(dst, size);
+  }
+
  private:
   caffe2::TypeMeta data_type_;
   DataPtr data_ptr_;
@@ -230,5 +252,30 @@ struct C10_API StorageImpl final : public c10::intrusive_ptr_target {
   // local to process cuda memory allocation
   bool received_cuda_;
   Allocator* allocator_;
+
+  std::unique_ptr<LmsStorageImpl> lms_;
+  friend class LmsStorageImpl;  // data_ptr_ access
 };
+
+// StorageImpl accessors for LMS to avoid circular depencencies
+inline const Allocator* LmsStorageImpl::allocator() const {
+  return storage_->allocator();
+}
+
+inline size_t LmsStorageImpl::capacity() const {
+  return storage_->capacity();
+}
+
+inline Device LmsStorageImpl::device() const {
+  return storage_->device();
+}
+
+inline void* LmsStorageImpl::device_ptr() const {
+  return storage_->data_ptr_.get();
+}
+
+inline at::DataPtr LmsStorageImpl::set_device_ptr(at::DataPtr&& data_ptr) {
+  std::swap(storage_->data_ptr_, data_ptr);
+  return std::move(data_ptr);
+}
 } // namespace c10

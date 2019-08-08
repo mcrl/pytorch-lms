@@ -23,7 +23,7 @@ void THPStorage_(writeFileRaw)(THWStorage *self, io fd, bool save_size)
 #else
   std::unique_ptr<char[]> cpu_data(new char[size * sizeof(scalar_t)]);
   data = (scalar_t*)cpu_data.get();
-  THCudaCheck(cudaMemcpy(data, THWStorage_(data)(LIBRARY_STATE self), size * sizeof(scalar_t), cudaMemcpyDeviceToHost));
+  THCStorage_copy_to_host(LIBRARY_STATE self, data);
 #endif
   if (save_size) {
     if (torch::utils::THP_nativeByteOrder() ==

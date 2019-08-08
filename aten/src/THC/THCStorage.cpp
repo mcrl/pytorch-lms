@@ -69,3 +69,12 @@ THCStorage* THCStorage_new(
       true).release();
   return storage;
 }
+
+void THCStorage_copy_to_host(THCState *state, THCStorage *storage, void *dst) {
+  size_t size = storage->capacity();
+  if (storage->lms_enabled() && storage->lms_reclaimed()) {
+    storage->lms_copy_reclaimed_data(dst, size);
+  } else {
+    THCudaCheck(cudaMemcpy(dst, storage->data(), size, cudaMemcpyDeviceToHost));
+  }
+}

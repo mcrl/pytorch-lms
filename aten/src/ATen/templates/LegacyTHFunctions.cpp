@@ -7,6 +7,7 @@
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/${Generator}.h>
 #include <ATen/ExpandUtils.h>
+#include <ATen/TensorGuard.h>
 ${th_headers}
 ${extra_cuda_headers}
 
