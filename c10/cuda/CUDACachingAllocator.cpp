@@ -183,9 +183,15 @@ struct LMSSettings {
     return device_limit;
   }
 
+  enum class ReclaimAlgo {
+    kFirst,
+    kSize,
+  };
+
   // Internal debug settings
   static int verbosity;
   static bool speculative_pageout;
+  static ReclaimAlgo reclaim_algo;
 
   static void init_debug_settings() {
     auto var = std::getenv("PYTORCH_LMS_DEBUG");
@@ -206,6 +212,10 @@ struct LMSSettings {
             if (val == "off") {
               speculative_pageout = false;
             }
+          } else if (key == "reclaim-algo") {
+            if (val == "size") {
+              reclaim_algo = ReclaimAlgo::kSize;
+            }
           }
         }
         if (delim == std::string::npos)
@@ -214,7 +224,9 @@ struct LMSSettings {
       }
       std::cout << "LMS: verbosity" << key_split << verbosity << "\n"
                 << "LMS: speculative-pageout" << key_split
-                << (speculative_pageout ? "on " : "off") << "\n";
+                << (speculative_pageout ? "on " : "off") << "\n"
+                << "LMS: reclaim_algo" << key_split
+                << ((reclaim_algo == ReclaimAlgo::kFirst) ? "first" : "size ") << "\n";
     }
   }
 
@@ -235,6 +247,7 @@ struct LMSSettings {
 
 int LMSSettings::verbosity = 0;
 bool LMSSettings::speculative_pageout = true;
+LMSSettings::ReclaimAlgo LMSSettings::reclaim_algo = LMSSettings::ReclaimAlgo::kFirst;
 
 struct AllocParams {
   AllocParams(int device, size_t size, cudaStream_t stream, BlockPool* pool, size_t alloc_size,
@@ -1136,7 +1149,8 @@ class DeviceCachingAllocator {
     }
   }
 
-  ReclaimStatus reclaim_one(size_t size) {
+  ReclaimStatus reclaim_one(AllocParams& p) {
+    size_t size = p.size();
     CudaLmsStorageImpl *best = nullptr;
     size_t best_size = ULONG_MAX;
 
@@ -1148,11 +1162,25 @@ class DeviceCachingAllocator {
         hook = hook->next();
 
         Block* block = lmsStorage->block();
-        if (block->size >= size && block->size < best_size) {
+        if (p.pool != block->pool)
+          continue;
+
+        if (block->size < size) {
+          size_t available = block->size;
+          const std::array<Block*, 2> neighbors = {block->prev, block->next};
+          for (Block* neighbor : neighbors) {
+            if (neighbor && !neighbor->allocated)
+              available += neighbor->size;
+          }
+          if (available < size)
+            continue;
+        }
+
+        if (block->size < best_size) {
           best = lmsStorage;
           best_size = block->size;
-          if (!should_split(block, size)) {
-            // close enough
+          if (LMSSettings::reclaim_algo == LMSSettings::ReclaimAlgo::kFirst ||
+              best_size < size || !should_split(block, size)) {
             break;
           }
         }
@@ -1165,7 +1193,8 @@ class DeviceCachingAllocator {
     return reclaim_one_internal(best, nullptr /* synchronous */);
   }
 
-  ReclaimStatus reclaim_fragments(size_t size) {
+  ReclaimStatus reclaim_fragments(AllocParams& p) {
+    size_t size = p.size();
     ReclaimStatus status = ReclaimStatus::kUnavailable;
 
     if (!reclaim_list.empty()) {
@@ -1178,6 +1207,9 @@ class DeviceCachingAllocator {
         hook = hook->next();
 
         Block* block = lmsStorage->block();
+        if (p.pool != block->pool)
+          continue;
+
         size_t alloc_size;
         getBaseAllocation(block, &alloc_size);
         if (alloc_size >= size) {
@@ -1219,8 +1251,6 @@ class DeviceCachingAllocator {
   }
 
   bool reclaim_block(AllocParams& p, std::unique_lock<std::recursive_mutex>& lock) {
-    size_t size = p.size();
-
     if (pageout_stream == LMS_INVALID_STREAM) {
       pageout_stream = cuda::getLMSCUDAStream().stream();
       pagein_stream = cuda::getLMSCUDAStream().stream();
@@ -1228,7 +1258,7 @@ class DeviceCachingAllocator {
 
     while (!reclaim_list.empty()) {
       // Reclaim a single suitable inactive allocation
-      auto status = reclaim_one(size);
+      auto status = reclaim_one(p);
       if (status == ReclaimStatus::kSuccess) {
         if (get_free_block(p, AllocSource::RECLAIM_ONE)) {
           break;
@@ -1238,7 +1268,7 @@ class DeviceCachingAllocator {
       }
       if (status == ReclaimStatus::kUnavailable) {
         // Reclaim fragments of suitable allocations
-        status = reclaim_fragments(size);
+        status = reclaim_fragments(p);
         if (status == ReclaimStatus::kSuccess) {
           if (get_free_block(p, AllocSource::RECLAIM_FRAGMENTS)) {
             break;
