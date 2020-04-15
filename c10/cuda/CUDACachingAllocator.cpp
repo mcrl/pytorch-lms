@@ -615,11 +615,27 @@ class DeviceCachingAllocator {
   }
 
   /** Retrieves info (total size + largest block) of the memory cache **/
-  void cacheInfo(size_t* total, size_t* largest)
+  void cacheInfo(size_t* available, size_t* totalCached, size_t* largest)
   {
+    /* get info from CUDA first */
+    size_t capacity;
+    C10_CUDA_CHECK(cudaMemGetInfo(available, &capacity));
+
     std::lock_guard<std::recursive_mutex> lock(mutex);
-    cache_info_aux(large_blocks, total, largest);
-    cache_info_aux(small_blocks, total, largest);
+    if (alloc_limit) {
+      size_t headroom = alloc_limit - stats.reserved_bytes[static_cast<size_t>(StatType::AGGREGATE)].current;
+      if (headroom < *available)
+        *available = headroom;
+    }
+
+    *totalCached = 0;
+    *largest = *available; /* not always true - our optimistic guess here */
+
+    cache_info_aux(large_blocks, totalCached, largest);
+    cache_info_aux(small_blocks, totalCached, largest);
+
+    /* Adjust resulting available bytes number. */
+    *available += *totalCached;
   }
 
   /** Returns a copy of the memory allocator stats **/
@@ -1554,8 +1570,8 @@ void emptyCache(void) {
   caching_allocator.emptyCache();
 }
 
-void cacheInfo(int dev_id, size_t* cachedAndFree, size_t* largestBlock) {
-  caching_allocator.device_allocator[dev_id]->cacheInfo(cachedAndFree, largestBlock);
+void cacheInfo(int dev_id, size_t* available, size_t* cached, size_t* largestBlock) {
+  caching_allocator.device_allocator[dev_id]->cacheInfo(available, cached, largestBlock);
 }
 
 void* getBaseAllocation(void *ptr, size_t *size)
