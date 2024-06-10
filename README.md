@@ -1,5 +1,5 @@
 
-# Pytorch-1.5 + IBM LMS (Large Model Support) integration
+# PyTorch-1.5 + IBM LMS (Large Model Support) Integration
 
 ## Install Step ##
 
