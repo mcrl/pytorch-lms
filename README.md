@@ -1,4 +1,33 @@
-![PyTorch Logo](https://github.com/pytorch/pytorch/blob/master/docs/source/_static/img/pytorch-logo-dark.png)
+
+# Pytorch-1.5 + IBM LMS (Large Model Support) integration
+
+## Install Step ##
+
+### Set Params ###
+```
+# consider multiple versions of CUDA-toolkit
+export CC=gcc-7
+export CXX=g++-7
+export PATH=/usr/local/cuda-10.2/bin:$PATH
+export CUDA_HOME=/usr/local/cuda-10.2
+export LIBRARY_PATH=/usr/local/cuda-10.2/lib64:$LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-10.2/:$LD_LIBRARY_PATH
+```
+
+### Conda Env Settings ###
+```
+conda create -n pytorch-lms python=3.6.9
+conda install -c pytorch magma-cuda102 # or [magma-cuda92 | magma-cuda100 | magma-cuda101 | magma-cuda102 ] depending on your cuda version
+conda install numpy ninja pyyaml mkl mkl-include setuptools cmake cffi typing
+```
+
+### Get Source & Build ###
+```
+git clone --recursive https://github.com/mcrl/pytorch-lms
+cd pytorch
+export CMAKE_PREFIX_PATH=${CONDA_PREFIX:-"$(dirname $(which conda))/../"}
+python setup.py install 
+```
 
 --------------------------------------------------------------------------------
 
